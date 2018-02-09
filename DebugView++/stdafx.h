@@ -77,3 +77,11 @@ extern CAppModule _Module;
 #include <boost/algorithm/string.hpp>
 #include <boost/tokenizer.hpp>
 #endif
+
+
+#include <mruby.h>
+#include <mruby/compile.h>
+#include <mruby/string.h>
+#include <mruby/data.h>
+#include <mruby/variable.h>
+

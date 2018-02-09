@@ -18,3 +18,4 @@ bin
 /VsSDK.props
 *.user
 .vs/
+_ReSharper.Caches/

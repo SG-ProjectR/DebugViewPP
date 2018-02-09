@@ -15,6 +15,7 @@
 #include "DebugView++Lib/LogFile.h"
 #include "FilterDlg.h"
 #include "DropTargetSupport.h"
+#include "CobaltFusion/Timer.h"
 
 namespace fusion {
 namespace debugviewpp {
@@ -53,8 +54,9 @@ struct LogLine
 {
 	explicit LogLine(int line);
 
-	bool bookmark;
-	int line;
+	unsigned int bookmark : 1;
+	unsigned int viewOwnData : 1;
+	unsigned int line : 30;
 };
 
 struct Column
@@ -120,7 +122,8 @@ class CLogView :
 	public ExceptionHandler<CLogView, std::exception>
 {
 public:
-	CLogView(const std::wstring& name, CMainFrame& mainFrame, LogFile& logFile, LogFilter logFilter = LogFilter());
+	CLogView(const std::wstring& name, CMainFrame& mainFrame, Timer &timer, LogFile* pLogFile, const std::wstring& filterPath);
+	~CLogView();
 
 	DECLARE_WND_SUPERCLASS(nullptr, CListViewCtrl::GetWndClassName())
 
@@ -159,8 +162,8 @@ public:
 	bool FindNext(const std::wstring& text);
 	bool FindPrevious(const std::wstring& text);
 
-	LogFilter GetFilters() const;
-	void SetFilters(const LogFilter& filter);
+	//LogFilter GetFilters() const;
+	//void SetFilters(const LogFilter& filter);
 
 	using CListViewCtrl::GetItemText;
 	std::string GetItemText(int item, int subItem) const;
@@ -178,6 +181,10 @@ public:
 	void MeasureItem(MEASUREITEMSTRUCT* pMeasureItemStruct) const;
 	void DrawItem(DRAWITEMSTRUCT* pDrawItemStruct) const;
 	void DeleteItem(DELETEITEMSTRUCT* lParam);
+
+	void ReloadFilter();
+	int LogOwnMessage(const std::string& msg, COLORREF color);
+	void UpdateOwnMessage(int line, const std::string& msg, COLORREF color);
 
 private:
 	DECLARE_MSG_MAP()
@@ -273,15 +280,21 @@ private:
 	TextColor GetTextColor(const Message& msg) const;
 	void ResetFilters();
 
+	void LoadFilterFile();
+	const Message GetLogMessage(const LogLine& logLine) const;
+
 	std::wstring m_name;
 	CMainFrame& m_mainFrame;
-	LogFile& m_logFile;
-	LogFilter m_filter;
+	Timer& m_timer;
+	LogFile* m_pLogFile;
+	LogFile& GetLogFile() const { return *m_pLogFile; }
+	std::wstring m_filterPath;
 	MatchColors m_matchColors;
 	CMyHeaderCtrl m_hdr;
 	std::vector<ColumnInfo> m_columns;
 	int m_firstLine;
 	std::deque<LogLine> m_logLines;
+	std::vector<Message> m_ownMessages;
 	bool m_clockTime;
 	bool m_processColors;
 	bool m_autoScrollDown;
@@ -299,6 +312,8 @@ private:
 	int m_scrollX;
 	std::wstring m_dispInfoText;
     CComObject<DropTargetSupport> * m_pDropTargetSupport;
+
+	mrb_state* m_mrbState;
 };
 
 } // namespace debugviewpp 

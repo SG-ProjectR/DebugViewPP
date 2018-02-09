@@ -82,6 +82,7 @@ public:
 	void AddMessage(const std::string& message);
 	boost::signals2::connection SubscribeToUpdate(UpdateSignal::slot_type slot);
 
+	Timer& GetTimer() { return m_timer; }
 private:
 	void UpdateSources();
 	void InternalRemove(LogSource*);

@@ -165,7 +165,7 @@ private:
 	void SetAlwaysOnTop(bool value);
 
 	void AddFilterView();
-	void AddFilterView(const std::wstring& name, const LogFilter& filter = LogFilter());
+	void AddFilterView(const std::wstring& name, const std::wstring& filterPath = L"");
 	void AddMessage(const Message& message);
 
 	void SetModifiedMark(int tabindex, bool modified);
@@ -239,8 +239,8 @@ private:
 	NOTIFYICONDATA m_notifyIconData;
 	LOGFONT m_logfont;
 	std::wstring m_applicationName;
-	DBWinReader* m_pLocalReader;
-	DBWinReader* m_pGlobalReader;
+	//DBWinReader* m_pLocalReader;
+	//DBWinReader* m_pGlobalReader;
 	DbgviewReader* m_pDbgviewReader;
 	std::vector<SourceInfo> m_sourceInfos;
 	std::unique_ptr<GuiExecutorClient> m_GuiExecutorClient;

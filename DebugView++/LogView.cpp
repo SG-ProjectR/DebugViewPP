@@ -111,6 +111,7 @@ Highlight::Highlight(int id, int begin, int end, const TextColor& color) :
 
 LogLine::LogLine(int line) :
 	bookmark(false),
+	viewOwnData(false),
 	line(line)
 {
 }
@@ -193,11 +194,12 @@ void CLogView::OnViewColumn(UINT /*uNotifyCode*/, int nID, CWindow /*wndCtl*/)
 	UpdateColumns();
 }
 
-CLogView::CLogView(const std::wstring& name, CMainFrame& mainFrame, LogFile& logFile, LogFilter filter) :
+CLogView::CLogView(const std::wstring& name, CMainFrame& mainFrame, Timer& timer, LogFile* pLogFile, const std::wstring& filterPath) :
 	m_name(name),
 	m_mainFrame(mainFrame),
-	m_logFile(logFile),
-	m_filter(std::move(filter)),
+	m_timer(timer),
+	m_pLogFile(pLogFile),
+	m_filterPath(filterPath),
 	m_firstLine(0),
 	m_clockTime(false),
 	m_processColors(false),
@@ -210,8 +212,15 @@ CLogView::CLogView(const std::wstring& name, CMainFrame& mainFrame, LogFile& log
 	m_dragStart(0, 0),
 	m_dragEnd(0, 0),
 	m_dragging(false),
-	m_scrollX(0)
+	m_scrollX(0),
+	m_mrbState(nullptr)
 {
+}
+
+CLogView::~CLogView()
+{
+	if (m_mrbState)
+		mrb_close(m_mrbState);
 }
 
 void CLogView::OnException() const
@@ -297,7 +306,9 @@ LRESULT CLogView::OnCreate(const CREATESTRUCT* /*pCreate*/)
 	m_columns.back().enable = false; // Default no Date column
 	m_columns.push_back(MakeColumn(Column::Time, L"Time", LVCFMT_RIGHT, 90));
 	m_columns.push_back(MakeColumn(Column::Pid, L"PID", LVCFMT_RIGHT, 60));
+	m_columns.back().enable = false; // Default no Date column
 	m_columns.push_back(MakeColumn(Column::Process, L"Process", LVCFMT_LEFT, 140));
+	m_columns.back().enable = false; // Default no Date column
 	m_columns.push_back(MakeColumn(Column::Message, L"Message", LVCFMT_LEFT, 1500));
 	UpdateColumns();
 
@@ -605,6 +616,11 @@ void CLogView::DeleteItem(DELETEITEMSTRUCT* lParam)
 	COwnerDraw<CLogView>::DeleteItem(lParam);
 }
 
+void CLogView::ReloadFilter()
+{
+	ApplyFilters();
+}
+
 int CLogView::GetTextIndex(int iItem, int xPos) const
 {
 	CClientDC dc(*this);
@@ -730,40 +746,40 @@ std::vector<Highlight> CLogView::GetHighlights(const std::string& text) const
 	std::vector<Highlight> highlights;
 
 	int highlightId = 1;
-	for (auto& filter : m_filter.messageFilters)
-	{
-		if (!filter.enable || filter.filterType != FilterType::Token)
-			continue;
+	//for (auto& filter : m_filter.messageFilters)
+	//{
+	//	if (!filter.enable || filter.filterType != FilterType::Token)
+	//		continue;
 
-		std::sregex_iterator begin(text.begin(), text.end(), filter.re), end;
-		int id = ++highlightId;
-		for (auto tok = begin; tok != end; ++tok)
-		{
-			int first = 0;
-			int count = 1;
-			if (tok->size() > 1 && filter.matchType == MatchType::RegexGroups)
-			{
-				first = 1;
-				count = tok->size();
-			}
-			for (int i = first; i < count; ++i)
-			{
-				int beginIndex = ExpandedTabOffset(text, tok->position(i));
-				int endIndex = ExpandedTabOffset(text, tok->position(i) + tok->length(i));
+	//	std::sregex_iterator begin(text.begin(), text.end(), filter.re), end;
+	//	int id = ++highlightId;
+	//	for (auto tok = begin; tok != end; ++tok)
+	//	{
+	//		int first = 0;
+	//		int count = 1;
+	//		if (tok->size() > 1 && filter.matchType == MatchType::RegexGroups)
+	//		{
+	//			first = 1;
+	//			count = tok->size();
+	//		}
+	//		for (int i = first; i < count; ++i)
+	//		{
+	//			int beginIndex = ExpandedTabOffset(text, tok->position(i));
+	//			int endIndex = ExpandedTabOffset(text, tok->position(i) + tok->length(i));
 
-				if (filter.bgColor == Colors::Auto)
-				{
-					auto itc = m_matchColors.find(tok->str(i));
-					if (itc != m_matchColors.end())
-						InsertHighlight(highlights, Highlight(id, beginIndex, endIndex, TextColor(itc->second, Colors::Text)));
-				}
-				else
-				{
-					InsertHighlight(highlights, Highlight(id, beginIndex, endIndex, TextColor(filter.bgColor, filter.fgColor)));
-				}
-			}
-		}
-	}
+	//			if (filter.bgColor == Colors::Auto)
+	//			{
+	//				auto itc = m_matchColors.find(tok->str(i));
+	//				if (itc != m_matchColors.end())
+	//					InsertHighlight(highlights, Highlight(id, beginIndex, endIndex, TextColor(itc->second, Colors::Text)));
+	//			}
+	//			else
+	//			{
+	//				InsertHighlight(highlights, Highlight(id, beginIndex, endIndex, TextColor(filter.bgColor, filter.fgColor)));
+	//			}
+	//		}
+	//	}
+	//}
 
 	InsertHighlight(highlights, text, Str(m_highlightText), TextColor(Colors::Highlight, Colors::Text));
 
@@ -813,10 +829,11 @@ ItemData CLogView::GetItemData(int iItem) const
 	data.text[Column::Time] = GetItemWText(iItem, ColumnToSubItem(Column::Time));
 	data.text[Column::Pid] = GetItemWText(iItem, ColumnToSubItem(Column::Pid));
 	data.text[Column::Process] = GetItemWText(iItem, ColumnToSubItem(Column::Process));
-	auto text = TabsToSpaces(m_logFile[m_logLines[iItem].line].text);
-	data.highlights = GetHighlights(m_logFile[m_logLines[iItem].line].text);
+	auto &msg = GetLogMessage(m_logLines[iItem]);
+	auto text = TabsToSpaces(msg.text);
+	data.highlights = GetHighlights(msg.text);
 	data.text[Column::Message] = WStr(text).str();
-	data.color = GetTextColor(m_logFile[m_logLines[iItem].line]);
+	data.color = TextColor((m_processColors || m_logLines[iItem].viewOwnData) ? msg.color : Colors::BackGround, Colors::Text);
 	return data;
 }
 
@@ -881,8 +898,7 @@ void CLogView::DrawItem(CDCHandle dc, int iItem, unsigned /*iItemState*/) const
 
 std::string CLogView::GetColumnText(int iItem, Column::type column) const
 {
-	int line = m_logLines[iItem].line;
-	const Message& msg = m_logFile[line];
+	const Message& msg = GetLogMessage(m_logLines[iItem]);
 
 	switch (column)
 	{
@@ -957,7 +973,7 @@ LRESULT CLogView::OnIncrementalSearch(NMHDR* pnmh)
 	int line = std::max(GetNextItem(-1, LVNI_FOCUSED), 0);
 	while (line != static_cast<int>(m_logLines.size()))
 	{
-		if (Contains(m_logFile[m_logLines[line].line].text, text))
+		if (Contains(GetLogMessage(m_logLines[line]).text, text))
 		{
 			SetHighlightText(nmhdr.lvfi.psz);
 			nmhdr.lvfi.lParam = line;
@@ -1005,7 +1021,7 @@ LRESULT CLogView::OnBeginDrag(NMHDR* pnmh)
 
 void CLogView::ClearView()
 {
-	m_firstLine = m_logFile.Count();
+	m_firstLine = GetLogFile().Count();
 	Clear();
 }
 
@@ -1036,13 +1052,13 @@ void CLogView::ResetToLine(int line)
 
 void CLogView::OnViewExcludeLines(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wndCtl*/)
 {
-	auto messages = GetSelectedMessages();
-	int size = std::min(size_t(100), messages.size());
-	for (int i = 0; i < size; ++i)
-	{
-		m_filter.messageFilters.push_back(Filter(messages[i], MatchType::Simple, FilterType::Exclude, RGB(255, 255, 255), RGB(0, 0, 0)));
-	}
-	ApplyFilters();
+	//auto messages = GetSelectedMessages();
+	//int size = std::min(size_t(100), messages.size());
+	//for (int i = 0; i < size; ++i)
+	//{
+	//	m_filter.messageFilters.push_back(Filter(messages[i], MatchType::Simple, FilterType::Exclude, RGB(255, 255, 255), RGB(0, 0, 0)));
+	//}
+	//ApplyFilters();
 }
 
 void CLogView::OnViewSelectAll(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wndCtl*/)
@@ -1099,8 +1115,8 @@ bool CLogView::FindProcess(int direction)
 	if (begin < 0)
 		return false;
 
-	auto processName = m_logFile[m_logLines[begin].line].processName;
-	int line = FindLine([processName, this](const LogLine& line) { return m_logFile[line.line].processName == processName; }, direction);
+	auto processName = GetLogMessage(m_logLines[begin]).processName;
+	int line = FindLine([processName, this](const LogLine& line) { return GetLogMessage(line).processName == processName; }, direction);
 	if (line < 0 || line == begin)
 		return false;
 
@@ -1121,15 +1137,15 @@ void CLogView::OnViewPreviousProcess(UINT /*uNotifyCode*/, int /*nID*/, CWindow 
 
 void CLogView::AddProcessFilter(FilterType::type filterType, COLORREF bgColor, COLORREF fgColor)
 {
-	std::unordered_set<std::string> names;
-	int item = -1;
-	while ((item = GetNextItem(item, LVNI_ALL | LVNI_SELECTED)) >= 0)
-		names.insert(m_logFile[m_logLines[item].line].processName);
+	//std::unordered_set<std::string> names;
+	//int item = -1;
+	//while ((item = GetNextItem(item, LVNI_ALL | LVNI_SELECTED)) >= 0)
+	//	names.insert(GetLogFile()[m_logLines[item].line].processName);
 
-	for (auto& name : names)
-		m_filter.processFilters.push_back(Filter(Str(name), MatchType::Simple, filterType, bgColor, fgColor));
+	//for (auto& name : names)
+	//	m_filter.processFilters.push_back(Filter(Str(name), MatchType::Simple, filterType, bgColor, fgColor));
 
-	ApplyFilters();
+	//ApplyFilters();
 }
 
 void CLogView::OnViewProcessHighlight(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wndCtl*/)
@@ -1159,11 +1175,11 @@ void CLogView::OnViewProcessOnce(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wn
 
 void CLogView::AddMessageFilter(FilterType::type filterType, COLORREF bgColor, COLORREF fgColor)
 {
-	if (m_highlightText.empty())
-		return;
+	//if (m_highlightText.empty())
+	//	return;
 
-	m_filter.messageFilters.push_back(Filter(Str(m_highlightText), MatchType::Simple, filterType, bgColor, fgColor));
-	ApplyFilters();
+	//m_filter.messageFilters.push_back(Filter(Str(m_highlightText), MatchType::Simple, filterType, bgColor, fgColor));
+	//ApplyFilters();
 }
 
 void CLogView::OnViewFilterHighlight(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wndCtl*/)
@@ -1323,7 +1339,7 @@ int CLogView::GetFocusLine() const
 
 void CLogView::SetFocusLine(int line)
 {
-	auto it = std::upper_bound(m_logLines.begin(), m_logLines.end(), line, [](int line, const LogLine& logLine) { return line < logLine.line; });
+	auto it = std::upper_bound(m_logLines.begin(), m_logLines.end(), line, [](int line, const LogLine& logLine) { return line < (int)logLine.line; });
 	ScrollToIndex(it - m_logLines.begin() - 1, false);
 }
 
@@ -1341,7 +1357,7 @@ void CLogView::Add(int beginIndex, int line, const Message& msg)
 	m_dirty = true;
 	m_changed = true;
 	auto it = m_logLines.begin();
-	while (it != m_logLines.end() && it->line < beginIndex)
+	while (it != m_logLines.end() && (int)it->line < beginIndex)
 		++it;
 	m_logLines.erase(m_logLines.begin(), it);
 
@@ -1406,20 +1422,20 @@ void CLogView::StopTracking()
 void CLogView::StopScrolling()
 {
 	m_autoScrollDown = false;
-	for (auto& filter : m_filter.messageFilters)
-	{
-		if (filter.filterType == FilterType::Track)
-		{
-			filter.enable = false;
-		}
-	}
-	for (auto& filter : m_filter.processFilters)
-	{
-		if (filter.filterType == FilterType::Track)
-		{
-			filter.enable = false;
-		}
-	}
+	//for (auto& filter : m_filter.messageFilters)
+	//{
+	//	if (filter.filterType == FilterType::Track)
+	//	{
+	//		filter.enable = false;
+	//	}
+	//}
+	//for (auto& filter : m_filter.processFilters)
+	//{
+	//	if (filter.filterType == FilterType::Track)
+	//	{
+	//		filter.enable = false;
+	//	}
+	//}
 	StopTracking();
 }
 
@@ -1586,7 +1602,7 @@ bool CLogView::Find(const std::string& text, int direction)
 {
 	StopTracking();
 
-	int line = FindLine([text, this](const LogLine& line) { return Contains(m_logFile[line.line].text, text); }, direction);
+	int line = FindLine([text, this](const LogLine& line) { return Contains(GetLogMessage(line).text, text); }, direction);
 	if (line < 0)
 		return false;
 
@@ -1635,11 +1651,11 @@ void CLogView::LoadSettings(CRegKey& reg)
 	if (columns.size() == m_columns.size())
 		m_columns.swap(columns);
 
-	CRegKey regFilters;
-	if (regFilters.Open(reg, L"MessageFilters") == ERROR_SUCCESS)
-		LoadFilterSettings(m_filter.messageFilters, regFilters);
-	if (regFilters.Open(reg, L"ProcessFilters") == ERROR_SUCCESS)
-		LoadFilterSettings(m_filter.processFilters, regFilters);
+	//CRegKey regFilters;
+	//if (regFilters.Open(reg, L"MessageFilters") == ERROR_SUCCESS)
+	//	LoadFilterSettings(m_filter.messageFilters, regFilters);
+	//if (regFilters.Open(reg, L"ProcessFilters") == ERROR_SUCCESS)
+	//	LoadFilterSettings(m_filter.processFilters, regFilters);
 
 	ApplyFilters();
 	UpdateColumns();
@@ -1664,11 +1680,11 @@ void CLogView::SaveSettings(CRegKey& reg)
 		++i;
 	}
 
-	CRegKey regFilters;
-	if (regFilters.Create(reg, L"MessageFilters") == ERROR_SUCCESS)
-		SaveFilterSettings(m_filter.messageFilters, regFilters);
-	if (regFilters.Create(reg, L"ProcessFilters") == ERROR_SUCCESS)
-		SaveFilterSettings(m_filter.processFilters, regFilters);
+	//CRegKey regFilters;
+	//if (regFilters.Create(reg, L"MessageFilters") == ERROR_SUCCESS)
+	//	SaveFilterSettings(m_filter.messageFilters, regFilters);
+	//if (regFilters.Create(reg, L"ProcessFilters") == ERROR_SUCCESS)
+	//	SaveFilterSettings(m_filter.processFilters, regFilters);
 }
 
 void CLogView::SaveSelection(const std::wstring& fileName) const
@@ -1683,8 +1699,7 @@ void CLogView::SaveSelection(const std::wstring& fileName) const
 	int item = -1;
 	while ((item = GetNextItem(item, LVNI_ALL | LVNI_SELECTED)) >= 0)
 	{
-		int line = m_logLines[item].line;
-		const Message& msg = m_logFile[line];
+		const Message& msg = GetLogMessage(m_logLines[item]);
 		WriteLogFileMessage(fs, msg.time, msg.systemTime, msg.processId, msg.processName, msg.text);
 	}
 
@@ -1701,8 +1716,7 @@ void CLogView::Save(const std::wstring& filename) const
 	int lines = GetItemCount();
 	for (int i = 0; i < lines; ++i)
 	{
-		int line = m_logLines[i].line;
-		const Message& msg = m_logFile[line];
+		const Message& msg = GetLogMessage(m_logLines[i]);
 		WriteLogFileMessage(fs, msg.time, msg.systemTime, msg.processId, msg.processName, msg.text);
 	}
 
@@ -1711,17 +1725,17 @@ void CLogView::Save(const std::wstring& filename) const
 		Win32::ThrowLastError(filename);
 }
 
-LogFilter CLogView::GetFilters() const
-{
-	return m_filter;
-}
+//LogFilter CLogView::GetFilters() const
+//{
+//	return m_filter;
+//}
 
-void CLogView::SetFilters(const LogFilter& filter)
-{
-	StopTracking();
-	m_filter = filter;
-	ApplyFilters();
-}
+//void CLogView::SetFilters(const LogFilter& filter)
+//{
+//	StopTracking();
+//	m_filter = filter;
+//	ApplyFilters();
+//}
 
 std::vector<int> CLogView::GetBookmarks() const
 {
@@ -1734,21 +1748,105 @@ std::vector<int> CLogView::GetBookmarks() const
 
 void CLogView::ResetFilters()
 {
-	for (auto& filter : m_filter.messageFilters)
-	{
-		if (filter.filterType == FilterType::Once)
-			filter.matched = false;
-	}
-	for (auto& filter : m_filter.processFilters)
-	{
-		if (filter.filterType == FilterType::Once)
-			filter.matched = false;
-	}
+	//for (auto& filter : m_filter.messageFilters)
+	//{
+	//	if (filter.filterType == FilterType::Once)
+	//		filter.matched = false;
+	//}
+	//for (auto& filter : m_filter.processFilters)
+	//{
+	//	if (filter.filterType == FilterType::Once)
+	//		filter.matched = false;
+	//}
 	m_matchColors.clear();
+}
+
+void mrb_FreeNone(mrb_state*, void*)
+{
+		
+}
+
+static const mrb_data_type pointer_type = { "LogView", mrb_FreeNone };
+mrb_value mrb_LogOwnMessage(mrb_state *state, mrb_value self)
+{
+	auto pView = (CLogView*)state->ud;
+	if (pView)
+	{
+		const char* str;
+		mrb_int color;
+		mrb_get_args(state, "zi", &str, &color);
+		return mrb_fixnum_value(pView->LogOwnMessage(str, (COLORREF)color));
+	}
+	return mrb_nil_value();
+}
+	
+mrb_value mrb_UpdateOwnMessage(mrb_state *state, mrb_value self)
+{
+	auto pView = (CLogView*)state->ud;
+	if (pView)
+	{
+		int line;
+		const char* str;
+		mrb_int color;
+		mrb_get_args(state, "izi", &line, &str, &color);
+		pView->UpdateOwnMessage(line, str, (COLORREF)color);
+	}
+	return mrb_nil_value();
+}
+
+int CLogView::LogOwnMessage(const std::string& msg, COLORREF color)
+{
+	//m_timer.Get(), Win32::GetSystemTimeAsFileTime()
+	m_ownMessages.push_back(Message(m_timer.Get(), Win32::GetSystemTimeAsFileTime(), 0, "", msg, color));
+	m_logLines.emplace_back(LogLine(int(m_ownMessages.size() - 1)));
+	m_logLines.back().viewOwnData = 1;
+	return int(m_logLines.size() - 1);
+}
+
+void CLogView::UpdateOwnMessage(int line, const std::string& msg, COLORREF color)
+{
+	if (line < 0 || line >= m_logLines.size())
+		return;
+	auto& lineData = m_logLines[line];
+	if (lineData.viewOwnData)
+	{
+		m_ownMessages[lineData.line].text = msg;
+		m_ownMessages[lineData.line].time = m_timer.Get();
+		m_ownMessages[lineData.line].color = color;
+		Update(line);
+	}
+}
+
+void CLogView::LoadFilterFile()
+{
+	m_filterPath = L"filter.mrb";
+
+	m_mrbState->ud = this;
+	auto p = CStringA(CStringW(m_filterPath.c_str()));
+	auto fd = fopen(p, "r");
+	if (fd)
+	{
+		mrb_define_method(m_mrbState, m_mrbState->kernel_module, "add", mrb_LogOwnMessage, MRB_ARGS_REQ(2));
+		mrb_define_method(m_mrbState, m_mrbState->kernel_module, "update", mrb_UpdateOwnMessage, MRB_ARGS_REQ(3));
+		auto ret = mrb_load_file(m_mrbState, fd);
+		if (mrb_exception_p(ret))
+		{
+		}
+		fclose(fd);
+	}
+}
+
+const Message CLogView::GetLogMessage(const LogLine& logLine) const
+{
+	return logLine.viewOwnData ? m_ownMessages[logLine.line] : GetLogFile()[logLine.line];
 }
 
 void CLogView::ApplyFilters()
 {
+	if (m_mrbState)
+		mrb_close(m_mrbState);
+	m_mrbState = mrb_open();
+	LoadFilterFile();
 	ResetFilters();
 	ClearSelection();
 
@@ -1759,20 +1857,22 @@ void CLogView::ApplyFilters()
 	auto bookmarks = GetBookmarks();
 	auto itBookmark = bookmarks.begin();
 
-	std::deque<LogLine> logLines;
-	//	logLines.reserve(m_logLines.size());
-	int count = m_logFile.Count();
+	m_logLines.clear();
+	m_ownMessages.clear();
+	std::deque<LogLine> &logLines = m_logLines;
+
+	int count = GetLogFile().Count();
 	int line = m_firstLine;
 	int item = 0;
 	focusItem = -1;
 	while (line < count)
 	{
-		if (IsIncluded(m_logFile[line]))
+		if (IsIncluded(GetLogFile()[line]))
 		{
 			logLines.emplace_back(LogLine(line));
 			if (itBookmark != bookmarks.end() && *itBookmark == line)
 			{
-				logLines.back().bookmark = true;
+				logLines.back().bookmark = 1;
 				++itBookmark;
 			}
 
@@ -1784,7 +1884,7 @@ void CLogView::ApplyFilters()
 		++line;
 	}
 
-	m_logLines.swap(logLines);
+	//m_logLines.swap(logLines);
 	SetItemCountEx(m_logLines.size(), LVSICF_NOSCROLL);
 	ScrollToIndex(focusItem, false);
 	SetItemState(focusItem, LVIS_FOCUSED, LVIS_FOCUSED);
@@ -1813,58 +1913,64 @@ std::vector<Filter> MoveHighlighFiltersToFront(std::vector<Filter> filters)
 
 TextColor CLogView::GetTextColor(const Message& msg) const
 {
-	auto messageFilters = MoveHighlighFiltersToFront(m_filter.messageFilters);
-	for (auto& filter : messageFilters)
-	{
-		std::smatch match;
-		if (filter.enable && FilterSupportsColor(filter.filterType) && std::regex_search(msg.text, match, filter.re))
-		{
-			if (filter.bgColor == Colors::Auto)
-			{
-				auto it = m_matchColors.find(MatchKey(match, filter.matchType));
-				if (it != m_matchColors.end())
-					return TextColor(it->second, Colors::Text);
-			}
-			else
-			{
-				return TextColor(filter.bgColor, filter.fgColor);
-			}
-		}
-	}
+	//auto messageFilters = MoveHighlighFiltersToFront(m_filter.messageFilters);
+	//for (auto& filter : messageFilters)
+	//{
+	//	std::smatch match;
+	//	if (filter.enable && FilterSupportsColor(filter.filterType) && std::regex_search(msg.text, match, filter.re))
+	//	{
+	//		if (filter.bgColor == Colors::Auto)
+	//		{
+	//			auto it = m_matchColors.find(MatchKey(match, filter.matchType));
+	//			if (it != m_matchColors.end())
+	//				return TextColor(it->second, Colors::Text);
+	//		}
+	//		else
+	//		{
+	//			return TextColor(filter.bgColor, filter.fgColor);
+	//		}
+	//	}
+	//}
 
-	auto processFilters = MoveHighlighFiltersToFront(m_filter.processFilters);
-	for (auto& filter : processFilters)
-	{
-		if (filter.enable && FilterSupportsColor(filter.filterType) && std::regex_search(msg.processName, filter.re))
-			return TextColor(filter.bgColor, filter.fgColor);
-	}
+	//auto processFilters = MoveHighlighFiltersToFront(m_filter.processFilters);
+	//for (auto& filter : processFilters)
+	//{
+	//	if (filter.enable && FilterSupportsColor(filter.filterType) && std::regex_search(msg.processName, filter.re))
+	//		return TextColor(filter.bgColor, filter.fgColor);
+	//}
 
 	return TextColor(m_processColors ? msg.color : Colors::BackGround, Colors::Text);
 }
 
 bool CLogView::IsClearMessage(const Message& msg) const
 {
-	using debugviewpp::MatchFilterType;
-	return MatchFilterType(m_filter.messageFilters, FilterType::Clear, msg.text);
+	//using debugviewpp::MatchFilterType;
+	//return MatchFilterType(m_filter.messageFilters, FilterType::Clear, msg.text);
+	return false;
 }
 
 bool CLogView::IsBeepMessage(const Message& msg) const
 {
-	using debugviewpp::MatchFilterType;
-	return MatchFilterType(m_filter.messageFilters, FilterType::Beep, msg.text) || MatchFilterType(m_filter.processFilters, FilterType::Beep, msg.text);
+	//using debugviewpp::MatchFilterType;
+	//return MatchFilterType(m_filter.messageFilters, FilterType::Beep, msg.text) || MatchFilterType(m_filter.processFilters, FilterType::Beep, msg.text);
+	return false;
 }
 
 bool CLogView::IsIncluded(const Message& msg)
 {
-	using debugviewpp::IsIncluded;
-	return IsIncluded(m_filter.processFilters, msg.processName, m_matchColors) && IsIncluded(m_filter.messageFilters, msg.text, m_matchColors);
+	//using debugviewpp::IsIncluded;
+	//return IsIncluded(m_filter.processFilters, msg.processName, m_matchColors) && IsIncluded(m_filter.messageFilters, msg.text, m_matchColors);
+	
+	auto ret = mrb_funcall(m_mrbState, mrb_value(), "filter", 1, mrb_str_new_cstr(m_mrbState, msg.text.c_str()));
+	return mrb_test(ret);
 }
 
 bool CLogView::MatchFilterType(FilterType::type type, const Message& msg) const
 {
-	using debugviewpp::MatchFilterType;
-	return MatchFilterType(m_filter.messageFilters, type, msg.text) ||
-		   MatchFilterType(m_filter.processFilters, type, msg.processName);
+	//using debugviewpp::MatchFilterType;
+	//return MatchFilterType(m_filter.messageFilters, type, msg.text) ||
+	//	   MatchFilterType(m_filter.processFilters, type, msg.processName);
+	return false;
 }
 
 } // namespace debugviewpp

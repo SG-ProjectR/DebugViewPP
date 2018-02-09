@@ -37,6 +37,7 @@
 #include "LogView.h"
 #include "MainFrame.h"
 
+
 namespace fusion {
 namespace debugviewpp {
 
@@ -226,8 +227,8 @@ CMainFrame::CMainFrame() :
 	m_configFileName(L"DebugView++.dbconf"),
 	m_initialPrivateBytes(ProcessInfo::GetPrivateBytes()),
 	m_logfont(GetDefaultLogFont()),
-	m_pLocalReader(nullptr),
-	m_pGlobalReader(nullptr),
+	//m_pLocalReader(nullptr),
+	//m_pGlobalReader(nullptr),
 	m_pDbgviewReader(nullptr),
 	m_GuiExecutorClient(std::make_unique<GuiExecutorClient>()),
 	m_logSources(*m_GuiExecutorClient)
@@ -309,12 +310,16 @@ LRESULT CMainFrame::OnCreate(const CREATESTRUCT* /*pCreate*/)
 	pLoop->AddMessageFilter(this);
 	pLoop->AddIdleHandler(this);
 
+	m_sourceInfos.push_back(SourceInfo(L"Game Debugging", SourceType::Udp, L"127.0.0.1", 51010));
+	m_sourceInfos.back().enabled = true;
+	m_logSources.AddUDPReader(51010);
 	m_logSources.SubscribeToUpdate([this] { return OnUpdate(); });
 
 	// Resume can throw if a second debugview is running
 	// so do not rely on any commands executed afterwards
 	if (!IsDBWinViewerActive())
 		Resume();
+
 	return 0;
 }
 
@@ -369,8 +374,8 @@ void CMainFrame::UpdateUI()
 	UISetCheck(ID_OPTIONS_AUTONEWLINE, m_logSources.GetAutoNewLine());
 	UISetCheck(ID_OPTIONS_ALWAYSONTOP, GetAlwaysOnTop());
 	UISetCheck(ID_OPTIONS_HIDE, m_hide);
-	UISetCheck(ID_LOG_PAUSE, !m_pLocalReader);
-	UIEnable(ID_LOG_GLOBAL, !!m_pLocalReader);
+	UISetCheck(ID_LOG_PAUSE, false);
+	UIEnable(ID_LOG_GLOBAL, false);
 	UISetCheck(ID_LOG_GLOBAL, m_tryGlobal);
 }
 
@@ -429,7 +434,7 @@ void CMainFrame::UpdateStatusBar()
 {
 	auto isearch = GetView().GetHighlightText();
 	std::wstring search = wstringbuilder() << L"Searching: \"" << isearch << L"\"";
-	UISetText(ID_DEFAULT_PANE, isearch.empty() ? (m_pLocalReader ? L"Ready" : L"Paused") : search.c_str());
+	UISetText(ID_DEFAULT_PANE, isearch.empty() ? L"Ready" : search.c_str());
 	UISetText(ID_SELECTION_PANE, GetSelectionInfoText(L"Selected", GetView().GetSelectedRange()).c_str());
 	UISetText(ID_VIEW_PANE, GetSelectionInfoText(L"View", GetView().GetViewRange()).c_str());
 	UISetText(ID_LOGFILE_PANE, GetSelectionInfoText(L"Log", GetLogFileRange()).c_str());
@@ -690,26 +695,26 @@ bool CMainFrame::LoadSettings()
 		SetLogFont();
 	}
 
-	CRegKey regViews;
-	if (regViews.Open(reg, L"Views") == ERROR_SUCCESS)
-	{
-		for (size_t i = 0;; ++i)
-		{
-			CRegKey regView;
-			if (regView.Open(regViews, WStr(wstringbuilder() << L"View" << i)) != ERROR_SUCCESS)
-				break;
+	//CRegKey regViews;
+	//if (regViews.Open(reg, L"Views") == ERROR_SUCCESS)
+	//{
+	//	for (size_t i = 0;; ++i)
+	//	{
+	//		CRegKey regView;
+	//		if (regView.Open(regViews, WStr(wstringbuilder() << L"View" << i)) != ERROR_SUCCESS)
+	//			break;
 
-			auto name = Win32::RegGetStringValue(regView);
-			if (i == 0)
-				GetTabCtrl().GetItem(0)->SetText(name.c_str());
-			else
-				AddFilterView(name);
-			GetView().LoadSettings(regView);
-		}
-		GetTabCtrl().SetCurSel(Win32::RegGetDWORDValue(regViews, L"Current", 0));
-		GetTabCtrl().UpdateLayout();
-		GetTabCtrl().Invalidate();
-	}
+	//		auto name = Win32::RegGetStringValue(regView);
+	//		if (i == 0)
+	//			GetTabCtrl().GetItem(0)->SetText(name.c_str());
+	//		else
+	//			AddFilterView(name);
+	//		GetView().LoadSettings(regView);
+	//	}
+	//	GetTabCtrl().SetCurSel(Win32::RegGetDWORDValue(regViews, L"Current", 0));
+	//	GetTabCtrl().UpdateLayout();
+	//	GetTabCtrl().Invalidate();
+	//}
 
 	CRegKey regColors;
 	if (regColors.Open(reg, L"Colors") == ERROR_SUCCESS)
@@ -780,21 +785,21 @@ void CMainFrame::FindPrevious(const std::wstring& text)
 
 void CMainFrame::AddFilterView()
 {
-	++m_filterNr;
-	CFilterDlg dlg(wstringbuilder() << L"View " << m_filterNr);
-	if (dlg.DoModal() != IDOK)
-		return;
+	//++m_filterNr;
+	//CFilterDlg dlg(wstringbuilder() << L"View " << m_filterNr);
+	//if (dlg.DoModal() != IDOK)
+	//	return;
 
-	AddFilterView(dlg.GetName(), dlg.GetFilters());
-	SaveSettings();
+	//AddFilterView(dlg.GetName(), dlg.GetFilters());
+	//SaveSettings();
 }
 
-void CMainFrame::AddFilterView(const std::wstring& name, const LogFilter& filter)
+void CMainFrame::AddFilterView(const std::wstring& name, const std::wstring& filterPath)
 {
 	auto pTabItem = std::make_unique<SelectedTabItem>();
 	pTabItem->Create(*this);
 
-	auto pView = std::make_shared<CLogView>(name, *this, m_logFile, filter);
+	auto pView = std::make_shared<CLogView>(name, *this, m_logSources.GetTimer(), &m_logFile, filterPath);
 	pView->Create(pTabItem->GetLogViewParent(), rcDefault, nullptr, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN);
 	pView->SetFont(m_hFont.get());
 
@@ -914,86 +919,86 @@ struct View
 
 void CMainFrame::LoadConfiguration(const std::wstring& fileName)
 {
-	boost::property_tree::ptree pt;
-	boost::property_tree::read_xml(Str(fileName), pt, boost::property_tree::xml_parser::trim_whitespace);
+	//boost::property_tree::ptree pt;
+	//boost::property_tree::read_xml(Str(fileName), pt, boost::property_tree::xml_parser::trim_whitespace);
 
-	auto autoNewline = pt.get<bool>("DebugViewPP.AutoNewline");
-	auto linkViews = pt.get<bool>("DebugViewPP.LinkViews");
+	//auto autoNewline = pt.get<bool>("DebugViewPP.AutoNewline");
+	//auto linkViews = pt.get<bool>("DebugViewPP.LinkViews");
 
-	auto viewsPt = pt.get_child("DebugViewPP.Views");
-	std::vector<View> views;
-	for (auto& item : viewsPt)
-	{
-		if (item.first == "View")
-		{
-			View view;
-			auto& viewPt = item.second;
-			view.index = viewPt.get<bool>("Index");
-			view.name = viewPt.get<std::string>("Name");
-			view.clockTime = viewPt.get<bool>("ClockTime");
-			view.processColors = viewPt.get<bool>("ProcessColors");
-			view.filters.messageFilters = MakeFilters(viewPt.get_child("MessageFilters"));
-			view.filters.processFilters = MakeFilters(viewPt.get_child("ProcessFilters"));
+	//auto viewsPt = pt.get_child("DebugViewPP.Views");
+	//std::vector<View> views;
+	//for (auto& item : viewsPt)
+	//{
+	//	if (item.first == "View")
+	//	{
+	//		View view;
+	//		auto& viewPt = item.second;
+	//		view.index = viewPt.get<bool>("Index");
+	//		view.name = viewPt.get<std::string>("Name");
+	//		view.clockTime = viewPt.get<bool>("ClockTime");
+	//		view.processColors = viewPt.get<bool>("ProcessColors");
+	//		view.filters.messageFilters = MakeFilters(viewPt.get_child("MessageFilters"));
+	//		view.filters.processFilters = MakeFilters(viewPt.get_child("ProcessFilters"));
 
-			views.push_back(view);
-		}
-	}
-	std::sort(views.begin(), views.end(), [](const View& v1, const View& v2) { return v1.index < v2.index; });
+	//		views.push_back(view);
+	//	}
+	//}
+	//std::sort(views.begin(), views.end(), [](const View& v1, const View& v2) { return v1.index < v2.index; });
 
-	m_logSources.SetAutoNewLine(autoNewline);
-	m_linkViews = linkViews;
+	//m_logSources.SetAutoNewLine(autoNewline);
+	//m_linkViews = linkViews;
 
-	for (int i = 0; i < static_cast<int>(views.size()); ++i)
-	{
-		if (i >= GetViewCount())
-			AddFilterView(WStr(views[i].name), views[i].filters);
-		else
-			GetView(i).SetFilters(views[i].filters);
+	//for (int i = 0; i < static_cast<int>(views.size()); ++i)
+	//{
+	//	if (i >= GetViewCount())
+	//		AddFilterView(WStr(views[i].name), views[i].filters);
+	//	else
+	//		GetView(i).SetFilters(views[i].filters);
 
-		auto& logView = GetView(i);
-		logView.SetClockTime(views[i].clockTime);
-		logView.SetViewProcessColors(views[i].processColors);
-	}
+	//	auto& logView = GetView(i);
+	//	logView.SetClockTime(views[i].clockTime);
+	//	logView.SetViewProcessColors(views[i].processColors);
+	//}
 
-	size_t i = GetViewCount();
-	while (i > views.size())
-	{
-		--i;
-		CloseView(i);
-	}
+	//size_t i = GetViewCount();
+	//while (i > views.size())
+	//{
+	//	--i;
+	//	CloseView(i);
+	//}
 }
 
 void CMainFrame::SaveConfiguration(const std::wstring& fileName)
 {
-#if BOOST_VERSION < 105600
-	boost::property_tree::xml_writer_settings<char> settings('\t', 1);
-#else
-	boost::property_tree::xml_writer_settings<std::string> settings('\t', 1);
-#endif
-
-	boost::property_tree::ptree mainPt;
-	mainPt.put("AutoNewline", m_logSources.GetAutoNewLine());
-	mainPt.put("LinkViews", m_linkViews);
-
-	int views = GetViewCount();
-	for (int i = 0; i < views; ++i)
-	{
-		auto& logView = GetView(i);
-		auto filters = logView.GetFilters();
-		boost::property_tree::ptree viewPt;
-		viewPt.put("Index", i);
-		viewPt.put("Name", Str(logView.GetName()).str());
-		viewPt.put("ClockTime", logView.GetClockTime());
-		viewPt.put("ProcessColors", logView.GetViewProcessColors());
-		viewPt.put_child("MessageFilters", MakePTree(filters.messageFilters));
-		viewPt.put_child("ProcessFilters", MakePTree(filters.processFilters));
-		mainPt.add_child("Views.View", viewPt);
-	}
-
-	boost::property_tree::ptree pt;
-	pt.add_child("DebugViewPP", mainPt);
-
-	boost::property_tree::write_xml(Str(fileName), pt, std::locale(), settings);
+//#if BOOST_VERSION < 105600
+//	boost::property_tree::xml_writer_settings<char> settings('\t', 1);
+//#else
+//	boost::property_tree::xml_writer_settings<std::string> settings('\t', 1);
+//#endif
+//
+//	boost::property_tree::ptree mainPt;
+//	mainPt.put("AutoNewline", m_logSources.GetAutoNewLine());
+//	mainPt.put("LinkViews", m_linkViews);
+//
+//	int views = GetViewCount();
+//	for (int i = 0; i < views; ++i)
+//	{
+//		auto& logView = GetView(i);
+//		auto filters = logView.GetFilters();
+//		boost::property_tree::ptree viewPt;
+//		viewPt.put("Index", i);
+//		viewPt.put("Name", Str(logView.GetName()).str());
+//		viewPt.put("ClockTime", logView.GetClockTime());
+//		viewPt.put("ProcessColors", logView.GetViewProcessColors());
+//		viewPt.put_child("MessageFilters", MakePTree(filters.messageFilters));
+//		viewPt.put_child("ProcessFilters", MakePTree(filters.processFilters));
+//		mainPt.add_child("Views.View", viewPt);
+//	}
+//
+//	boost::property_tree::ptree pt;
+//	pt.add_child("DebugViewPP", mainPt);
+//
+//	boost::property_tree::write_xml(Str(fileName), pt, std::locale(), settings);
 }
 
 void CMainFrame::OnFileOpen(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wndCtl*/)
@@ -1181,22 +1186,22 @@ void CMainFrame::OnAlwaysOnTop(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wndC
 
 bool CMainFrame::IsPaused() const
 {
-	return !m_pLocalReader;
+	return false;
 }
 
 void CMainFrame::Pause()
 {
 	SetTitle(L"Paused");
-	if (m_pLocalReader)
-	{
-		m_logSources.Remove(m_pLocalReader);
-		m_pLocalReader = nullptr;
-	}
-	if (m_pGlobalReader)
-	{
-		m_logSources.Remove(m_pGlobalReader);
-		m_pGlobalReader = nullptr;
-	}
+	//if (m_pLocalReader)
+	//{
+	//	m_logSources.Remove(m_pLocalReader);
+	//	m_pLocalReader = nullptr;
+	//}
+	//if (m_pGlobalReader)
+	//{
+	//	m_logSources.Remove(m_pGlobalReader);
+	//	m_pGlobalReader = nullptr;
+	//}
 	m_logSources.AddMessage("<paused>");
 }
 
@@ -1204,55 +1209,55 @@ void CMainFrame::Resume()
 {
 	SetTitle();
 
-	if (!m_pLocalReader)
-	{
-		try
-		{
-			m_pLocalReader = m_logSources.AddDBWinReader(false);
-		}
-		catch (std::exception&)
-		{
-			MessageBox(L"Unable to capture Win32 Messages.\n"
-					   L"\n"
-					   L"Another DebugView++ (or similar application) might be running.\n",
-				m_applicationName.c_str(), MB_ICONERROR | MB_OK);
-			return;
-		}
-	}
+	//if (!m_pLocalReader)
+	//{
+	//	try
+	//	{
+	//		m_pLocalReader = m_logSources.AddDBWinReader(false);
+	//	}
+	//	catch (std::exception&)
+	//	{
+	//		MessageBox(L"Unable to capture Win32 Messages.\n"
+	//				   L"\n"
+	//				   L"Another DebugView++ (or similar application) might be running.\n",
+	//			m_applicationName.c_str(), MB_ICONERROR | MB_OK);
+	//		return;
+	//	}
+	//}
 
-	if (m_tryGlobal)
-	{
-		try
-		{
-			m_pGlobalReader = m_logSources.AddDBWinReader(true);
-		}
-		catch (std::exception&)
-		{
-			MessageBox(L"Unable to capture Global Win32 Messages.\n"
-					   L"\n"
-					   L"Make sure you have appropriate permissions.\n"
-					   L"\n"
-					   L"You may need to start this application by right-clicking it and selecting\n"
-					   L"'Run As Administator' even if you have administrator rights.",
-				m_applicationName.c_str(), MB_ICONERROR | MB_OK);
-			m_tryGlobal = false;
-		}
-	}
+	//if (m_tryGlobal)
+	//{
+	//	try
+	//	{
+	//		m_pGlobalReader = m_logSources.AddDBWinReader(true);
+	//	}
+	//	catch (std::exception&)
+	//	{
+	//		MessageBox(L"Unable to capture Global Win32 Messages.\n"
+	//				   L"\n"
+	//				   L"Make sure you have appropriate permissions.\n"
+	//				   L"\n"
+	//				   L"You may need to start this application by right-clicking it and selecting\n"
+	//				   L"'Run As Administator' even if you have administrator rights.",
+	//			m_applicationName.c_str(), MB_ICONERROR | MB_OK);
+	//		m_tryGlobal = false;
+	//	}
+	//}
 
-	std::wstring title = L"Paused";
-	if (m_pLocalReader && m_pGlobalReader)
-	{
-		title = L"Capture Win32 & Global Win32 Messages";
-	}
-	else if (m_pLocalReader)
-	{
-		title = L"Capture Win32";
-	}
-	else if (m_pGlobalReader)
-	{
-		title = L"Capture Global Win32";
-	}
-	SetTitle(title);
+	//if (m_pLocalReader && m_pGlobalReader)
+	//{
+	//	title = L"Capture Win32 & Global Win32 Messages";
+	//}
+	//else if (m_pLocalReader)
+	//{
+	//	title = L"Capture Win32";
+	//}
+	//else if (m_pGlobalReader)
+	//{
+	//	title = L"Capture Global Win32";
+	//}
+	//std::wstring title = L"Paused";
+	//SetTitle(title);
 }
 
 void CMainFrame::OnLogPause(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wndCtl*/)
@@ -1265,17 +1270,17 @@ void CMainFrame::OnLogPause(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wndCtl*
 
 void CMainFrame::OnLogGlobal(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wndCtl*/)
 {
-	m_tryGlobal = !m_pGlobalReader;
+	//m_tryGlobal = !m_pGlobalReader;
 
-	if (m_pLocalReader && m_tryGlobal)
-	{
-		Resume();
-	}
-	else
-	{
-		m_logSources.Remove(m_pGlobalReader);
-		m_pGlobalReader = nullptr;
-	}
+	//if (m_pLocalReader && m_tryGlobal)
+	//{
+	//	Resume();
+	//}
+	//else
+	//{
+	//	m_logSources.Remove(m_pGlobalReader);
+	//	m_pGlobalReader = nullptr;
+	//}
 }
 
 void CMainFrame::OnLogHistory(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wndCtl*/)
@@ -1316,18 +1321,19 @@ void CMainFrame::OnLogDebugviewAgent(UINT /*uNotifyCode*/, int /*nID*/, CWindow 
 
 void CMainFrame::OnViewFilter(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wndCtl*/)
 {
-    int tabIdx = GetTabCtrl().GetCurSel();
+	GetView().ReloadFilter();
+ //   int tabIdx = GetTabCtrl().GetCurSel();
 
-	CFilterDlg dlg(GetView().GetName(), GetView().GetFilters());
-	if (dlg.DoModal() != IDOK)
-		return;
+	//CFilterDlg dlg(GetView().GetName(), GetView().GetFilters());
+	//if (dlg.DoModal() != IDOK)
+	//	return;
 
-	GetTabCtrl().GetItem(tabIdx)->SetText(dlg.GetName().c_str());
-	GetTabCtrl().UpdateLayout();
-	GetTabCtrl().Invalidate();
-	GetView().SetName(dlg.GetName());
-	GetView().SetFilters(dlg.GetFilters());
-	SaveSettings();
+	//GetTabCtrl().GetItem(tabIdx)->SetText(dlg.GetName().c_str());
+	//GetTabCtrl().UpdateLayout();
+	//GetTabCtrl().Invalidate();
+	//GetView().SetName(dlg.GetName());
+	//GetView().SetFilters(dlg.GetFilters());
+	//SaveSettings();
 }
 
 void CMainFrame::OnViewClose(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wndCtl*/)
@@ -1341,11 +1347,11 @@ void CMainFrame::OnSources(UINT /*uNotifyCode*/, int /*nID*/, CWindow /*wndCtl*/
 	if (dlg.DoModal() != IDOK)
 		return;
 
-	m_logSources.RemoveSources([this](LogSource* logsource) {
-		if (logsource == m_pLocalReader)
-			return false;
-		if (logsource == m_pGlobalReader)
-			return false;
+	m_logSources.RemoveSources([this](LogSource* /*logsource*/) {
+		//if (logsource == m_pLocalReader)
+		//	return false;
+		//if (logsource == m_pGlobalReader)
+		//	return false;
 		return true;
 	});
 
